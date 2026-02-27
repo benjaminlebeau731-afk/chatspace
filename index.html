@@ -1,0 +1,1641 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Chat Space</title>
+    <!-- PWA Manifest for "Add to Home Screen" -->
+    <link rel="manifest" href="data:application/manifest+json;base64,eyJuYW1lIjoiQ2hhdCBTcGFjZSIsInNob3J0X25hbWUiOiJDaGF0U3BhY2UiLCJzdGFydF91cmwiOiIuIiwiZGlzcGxheSI6InN0YW5kYWxvbmUiLCJiYWNrZ3JvdW5kX2NvbG9yIjoiIzBwMTcyYSIsInRoZW1lX2NvbG9yIjoiIzBwMTcyYSIsImljb25zIjpbeyJzcmMiOiJodHRwczov2x1Y2lkZS5kZXYvbG9nby5zdmciLCJzaXplcyI6IjE5MngxOTIiLCJ0eXBlIjoiaW1hZ2Uvc3ZnK3htbCJ9XX0=">
+    <meta name="theme-color" content="#0f172a">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <!-- Import PeerJS -->
+    <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+    <script type="module">
+        console.log("App starting...");
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { 
+            getAuth, 
+            signInAnonymously, 
+            signInWithCustomToken,
+            onAuthStateChanged,
+            signOut
+        } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { 
+            getFirestore, 
+            collection, 
+            addDoc, 
+            query, 
+            orderBy, 
+            onSnapshot, 
+            where, 
+            serverTimestamp, 
+            doc, 
+            setDoc, 
+            getDocs,
+            getDoc,
+            updateDoc,
+            arrayUnion,
+            arrayRemove,
+            limit,
+            Timestamp,
+            deleteDoc,
+            writeBatch
+        } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // --- Service Worker for PWA Support ---
+        if ('serviceWorker' in navigator) {
+            const swContent = `
+                self.addEventListener('install', (e) => self.skipWaiting());
+                self.addEventListener('activate', (e) => e.waitUntil(self.clients.claim()));
+                self.addEventListener('fetch', (e) => {}); 
+            `;
+            const blob = new Blob([swContent], {type: 'text/javascript'});
+            const swUrl = URL.createObjectURL(blob);
+            navigator.serviceWorker.register(swUrl)
+                .then(() => console.log('SW registered'))
+                .catch(err => console.error('SW failed', err));
+        }
+
+        // --- Configuration ---
+        const firebaseConfig = {
+            apiKey: "AIzaSyAkW6DI0jCMkOJY8t_txCntd5MhRed443w",
+            authDomain: "d-multiplayer-37078.firebaseapp.com",
+            projectId: "d-multiplayer-37078",
+            storageBucket: "d-multiplayer-37078.firebasestorage.app",
+            messagingSenderId: "1032442419330",
+            appId: "1:1032442419330:web:cfd110e8442febf829bc9b",
+            measurementId: "G-7KC04NRGE5"
+        };
+
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-chat-app';
+
+        const MAX_DAILY_MESSAGES = 400;
+        const MAX_CONCURRENT_USERS = 50;
+        const MAX_CHAT_HISTORY = 20; 
+        const ADMIN_CODE = "07312012";
+        const SUPPORT_CHAT_ID = 'admin-support-channel';
+        
+        const BAD_WORDS = [
+            'badword', 'swear', 'curse', 'ugly', 'stupid', 'hate', 
+            'fuck', 'shit', 'bitch', 'asshole', 'cunt', 'dick', 
+            'pussy', 'bastard', 'whore', 'slut', 'damn', 'crap'
+        ]; 
+
+        // Sound & Audio Context
+        let audioCtx = null;
+        let keepAliveOscillator = null;
+        
+        const initAudio = () => {
+            if (!audioCtx) {
+                audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            }
+            if (audioCtx.state === 'suspended') {
+                audioCtx.resume();
+            }
+        };
+
+        const playNotificationSound = () => {
+            if (!state.notificationsEnabled) return; 
+            try {
+                initAudio();
+                const osc = audioCtx.createOscillator();
+                const gain = audioCtx.createGain();
+                osc.connect(gain);
+                gain.connect(audioCtx.destination);
+                osc.type = 'sine';
+                osc.frequency.setValueAtTime(500, audioCtx.currentTime);
+                gain.gain.setValueAtTime(0.1, audioCtx.currentTime);
+                osc.start();
+                osc.stop(audioCtx.currentTime + 0.1);
+            } catch(e) { console.log("Audio play failed", e); }
+        };
+
+        // --- Load Initial State from Local Storage ---
+        const savedUsername = localStorage.getItem('chat_username') || '';
+        let savedContacts = [];
+        try {
+            savedContacts = JSON.parse(localStorage.getItem('chat_contacts') || '[]');
+        } catch (e) {
+            console.error("Failed to parse contacts", e);
+            savedContacts = [];
+        }
+
+        // --- State ---
+        const state = {
+            user: null,
+            username: savedUsername, 
+            hasJoined: false,
+            isAdmin: false, 
+            showAdminPanel: false, 
+            isBanned: false, 
+            isAppealing: false, 
+            activeTab: 'global',
+            activeChatId: 'global',
+            activeChatName: 'Global Chat',
+            activeChatType: 'global',
+            isSidebarOpen: window.innerWidth >= 768,
+            messages: [],
+            myChats: [],
+            contacts: savedContacts,
+            activeUsers: [], 
+            bannedUsers: [], 
+            dailyMessageCount: 0,
+            unreadChats: new Set(), 
+            notificationsEnabled: true,
+            backgroundMode: false,
+            joinError: '',
+            authError: '', 
+            dbError: '', 
+            isJoining: false,
+            unsubscribes: [],
+            peer: null,
+            localStream: null,
+            remoteStream: null,
+            currentCall: null,
+            isCallActive: false,
+            callStatus: '',
+            incomingCall: null,
+            channelVoiceActive: false
+        };
+
+        const root = document.getElementById('root');
+
+        // --- Authentication & Init ---
+        async function initAuth() {
+            try {
+                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                    await signInWithCustomToken(auth, __initial_auth_token);
+                } else {
+                    await signInAnonymously(auth);
+                }
+            } catch (error) {
+                console.error("Auth error:", error);
+                state.authError = error.message;
+                render();
+            }
+        }
+
+        onAuthStateChanged(auth, (user) => {
+            state.user = user;
+            if (user) {
+                state.authError = '';
+                if (state.username) {
+                    state.hasJoined = true;
+                    initPeer(user.uid);
+                    setupListeners();
+                }
+            }
+            render();
+        });
+
+        initAuth();
+
+        // --- PeerJS Initialization ---
+        function initPeer(uid) {
+            const peerId = `chat-space-${uid}`;
+            
+            if (state.peer) state.peer.destroy();
+
+            state.peer = new Peer(peerId, {
+                config: { iceServers: [{ urls: 'stun:stun1.l.google.com:19302' }, { urls: 'stun:stun2.l.google.com:19302' }] },
+                debug: 1
+            });
+
+            state.peer.on('open', (id) => {
+                console.log('My peer ID is: ' + id);
+            });
+
+            state.peer.on('call', (call) => {
+                const meta = call.metadata || {};
+                const callerName = meta.callerName || 'Unknown';
+                const callType = meta.callType || 'dm';
+                const chatId = meta.chatId || 'unknown';
+
+                if (state.isCallActive) {
+                    call.close();
+                    return;
+                }
+
+                state.incomingCall = { call, callerName, callType, chatId };
+                sendNotification(`Incoming Call`, `${callerName} is calling you...`);
+                playNotificationSound();
+                if (navigator.vibrate) navigator.vibrate([300, 200, 300, 200, 300]);
+                render();
+            });
+
+            state.peer.on('error', (err) => {
+                console.error('PeerJS error:', err);
+            });
+        }
+
+        // --- Notifications ---
+        function requestNotificationPermission() {
+            initAudio();
+            if (!("Notification" in window)) return;
+
+            if (Notification.permission === 'default') {
+                Notification.requestPermission().then(permission => {
+                    if (permission === 'granted') {
+                        const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
+                        const isStandalone = window.navigator.standalone || window.matchMedia('(display-mode: standalone)').matches;
+                        if (isIOS && !isStandalone) {
+                            alert("IMPORTANT: On iOS, you MUST add this app to your Home Screen for notifications to work when the app is closed. Tap Share -> Add to Home Screen.");
+                        } else {
+                            new Notification("Notifications Enabled", { body: "You will now receive messages when backgrounded." });
+                        }
+                    }
+                });
+            }
+        }
+
+        function sendNotification(title, body) {
+            if (!state.notificationsEnabled) return; 
+            if ("vibrate" in navigator) { try { navigator.vibrate([200, 100, 200]); } catch(e){} }
+            
+            if (document.hidden && "Notification" in window && Notification.permission === "granted") {
+                try {
+                    navigator.serviceWorker.getRegistration().then(reg => {
+                        if (reg) {
+                            reg.showNotification(title, {
+                                body,
+                                icon: 'https://cdn.jsdelivr.net/npm/lucide-static@0.419.0/icons/message-square.svg',
+                                tag: 'chat-message',
+                                renotify: true,
+                                requireInteraction: true,
+                                vibrate: [200, 100, 200]
+                            });
+                        } else {
+                            const notif = new Notification(title, { body, icon: 'https://cdn.jsdelivr.net/npm/lucide-static@0.419.0/icons/message-square.svg', tag: 'chat-message', renotify: true, silent: true });
+                            setTimeout(() => notif.close(), 5000);
+                        }
+                    });
+                } catch(e) { console.log("Notif error", e); }
+            }
+            playNotificationSound();
+        }
+
+        window.toggleNotifications = () => {
+            state.notificationsEnabled = !state.notificationsEnabled;
+            if (state.notificationsEnabled) {
+                requestNotificationPermission();
+            }
+            renderUserFooter();
+        };
+
+        window.toggleBackgroundMode = () => {
+            state.backgroundMode = !state.backgroundMode;
+            initAudio(); 
+            if (state.backgroundMode) {
+                try {
+                    if (keepAliveOscillator) keepAliveOscillator.stop();
+                    keepAliveOscillator = audioCtx.createOscillator();
+                    const gain = audioCtx.createGain();
+                    keepAliveOscillator.type = 'sine';
+                    keepAliveOscillator.frequency.value = 30; 
+                    gain.gain.value = 0.001; 
+                    keepAliveOscillator.connect(gain);
+                    gain.connect(audioCtx.destination);
+                    keepAliveOscillator.start();
+                    if ('mediaSession' in navigator) {
+                        navigator.mediaSession.metadata = new MediaMetadata({ title: 'Background Service', artist: 'Chat Space', album: 'Keeping connection alive' });
+                        navigator.mediaSession.setActionHandler('play', () => {});
+                        navigator.mediaSession.setActionHandler('pause', () => {});
+                    }
+                } catch(e) {
+                    console.error("BG Mode failed", e);
+                    state.backgroundMode = false;
+                }
+            } else {
+                if (keepAliveOscillator) { keepAliveOscillator.stop(); keepAliveOscillator = null; }
+            }
+            renderUserFooter();
+        };
+
+        // --- Voice Logic (PeerJS) ---
+
+        window.handleVoiceAction = async () => {
+            initAudio(); 
+            if (!state.activeChatId || state.activeChatId === 'global') {
+                alert("Voice unavailable in global chat.");
+                return;
+            }
+            if (state.isCallActive) {
+                window.hangUp();
+                return;
+            }
+            if (state.activeChatType === 'dm') {
+                const chat = state.myChats.find(c => c.id === state.activeChatId);
+                if (!chat) return;
+                const otherUid = chat.participants.find(p => p !== state.user.uid);
+                if (otherUid) startPeerCall(otherUid, 'dm');
+                else alert("Could not find user to call.");
+            } else {
+                joinChannelVoice(); 
+            }
+        };
+
+        window.joinChannelVoice = async () => {
+            const channelRef = doc(db, 'artifacts', appId, 'public', 'data', 'chats', state.activeChatId);
+            state.callStatus = 'connecting';
+            state.isCallActive = true;
+            render();
+            if (!await setupLocalStream()) { window.hangUp(); return; }
+            const snap = await getDoc(channelRef);
+            const data = snap.data();
+            const now = Date.now();
+            const lastActive = data.voiceLastActive ? data.voiceLastActive.toMillis() : 0;
+            const isHostActive = (now - lastActive) < 60000; 
+            if (data.activeVoiceHost && data.activeVoiceHost !== state.user.uid && isHostActive) {
+                startPeerCall(data.activeVoiceHost, 'channel');
+            } else {
+                await updateDoc(channelRef, { activeVoiceHost: state.user.uid, voiceLastActive: serverTimestamp() });
+                state.voiceHeartbeat = setInterval(() => { updateDoc(channelRef, { voiceLastActive: serverTimestamp() }).catch(e=>{}); }, 10000);
+                state.callStatus = 'hosting';
+                render();
+            }
+        };
+
+        async function startPeerCall(targetUid, type) {
+            state.isCallActive = true;
+            state.callStatus = 'calling';
+            render();
+            if (!state.localStream) { if (!await setupLocalStream()) { window.hangUp(); return; } }
+            const targetPeerId = `chat-space-${targetUid}`;
+            const call = state.peer.call(targetPeerId, state.localStream, { metadata: { callerName: state.username, callType: type, chatId: state.activeChatId } });
+            handleCallStream(call);
+        }
+
+        window.answerCall = async () => {
+            initAudio(); 
+            if (!state.incomingCall) return;
+            const { call } = state.incomingCall;
+            state.incomingCall = null;
+            state.isCallActive = true;
+            state.callStatus = 'connecting';
+            render();
+            if (!await setupLocalStream()) { window.hangUp(); return; }
+            call.answer(state.localStream);
+            handleCallStream(call);
+        };
+
+        function handleCallStream(call) {
+            state.currentCall = call;
+            call.on('stream', (remoteStream) => {
+                state.remoteStream = remoteStream;
+                state.callStatus = 'connected';
+                render();
+                setTimeout(() => { const remoteVid = document.getElementById('remote-video'); if (remoteVid) remoteVid.srcObject = remoteStream; }, 100);
+            });
+            call.on('close', () => { window.hangUp(); });
+            call.on('error', (err) => { console.error("Call error:", err); alert("Call connection failed."); window.hangUp(); });
+        }
+
+        async function setupLocalStream() {
+            if (state.localStream) return true;
+            if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { alert("Browser does not support WebRTC or site is not HTTPS."); return false; }
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+                state.localStream = stream;
+                setTimeout(() => { const localVid = document.getElementById('local-video'); if (localVid) localVid.srcObject = stream; }, 100);
+                return true;
+            } catch (e) { console.error("Media error", e); alert("Could not access camera/microphone."); return false; }
+        }
+
+        window.hangUp = async () => {
+            if (state.currentCall) state.currentCall.close();
+            if (state.localStream) state.localStream.getTracks().forEach(track => track.stop());
+            if (state.voiceHeartbeat) { clearInterval(state.voiceHeartbeat); state.voiceHeartbeat = null; }
+            state.currentCall = null;
+            state.localStream = null;
+            state.remoteStream = null;
+            state.isCallActive = false;
+            state.callStatus = '';
+            render();
+        };
+
+        window.rejectCall = () => {
+            if (state.incomingCall && state.incomingCall.call) state.incomingCall.call.close();
+            state.incomingCall = null;
+            render();
+        };
+
+        // --- Chat Management Actions ---
+
+        window.deleteChannel = async (chatId, chatName) => {
+            if(!confirm(`Are you sure you want to permanently delete the channel "${chatName}"?`)) return;
+            try {
+                await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'chats', chatId));
+                if (state.activeChatId === chatId) switchChat('global', 'Global Chat', 'global');
+            } catch (e) { alert("Failed to delete channel: " + e.message); }
+        };
+
+        window.hideChat = async (chatId, isChannel) => {
+            const type = isChannel ? 'channel' : 'conversation';
+            if(!confirm(`Hide this ${type}? You can rejoin if invited or by creating it again.`)) return;
+            try {
+                const chatRef = doc(db, 'artifacts', appId, 'public', 'data', 'chats', chatId);
+                await updateDoc(chatRef, { participants: arrayRemove(state.user.uid) });
+                if (state.activeChatId === chatId) switchChat('global', 'Global Chat', 'global');
+            } catch (e) { alert("Failed to hide chat: " + e.message); }
+        };
+
+        // --- ADMIN FUNCTIONS ---
+
+        window.toggleAdminPanel = () => {
+            state.showAdminPanel = !state.showAdminPanel;
+            if (state.showAdminPanel) {
+                openAdminPanel(); // Fetch data
+            } else {
+                render();
+            }
+        };
+
+        window.openAdminPanel = () => {
+            state.showAdminPanel = true;
+            render(); // Open modal 
+            
+            // Fetch users for admin panel
+            getDocs(query(collection(db, 'artifacts', appId, 'public', 'data', 'presence'))).then(snap => {
+                state.activeUsers = snap.docs.map(d => d.data());
+                render(); 
+            });
+            getDocs(query(collection(db, 'artifacts', appId, 'public', 'data', 'banned'))).then(snap => {
+                state.bannedUsers = snap.docs.map(d => ({id: d.id, ...d.data()}));
+                render();
+            });
+        };
+
+        window.closeAdminPanel = () => {
+            state.showAdminPanel = false;
+            render();
+        }
+
+        window.kickUser = async (targetUid) => {
+            if(!confirm("Kick this user? They will be forced to refresh.")) return;
+            try {
+                await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'commands'), {
+                    type: 'kick',
+                    targetUid: targetUid,
+                    timestamp: serverTimestamp()
+                });
+                alert("Kick command sent.");
+                openAdminPanel(); 
+            } catch(e) { 
+                console.error(e);
+                alert("Kick failed: " + e.message); 
+            }
+        };
+
+        window.removeUser = async (targetUid) => {
+            if(!confirm("Remove this user? This will force them to log out and clear their session.")) return;
+            try {
+                await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'commands'), {
+                    type: 'remove',
+                    targetUid: targetUid,
+                    timestamp: serverTimestamp()
+                });
+                await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'presence', targetUid));
+                alert("User removed.");
+                openAdminPanel();
+            } catch(e) { alert("Remove failed: " + e.message); }
+        };
+
+        window.banUser = async (targetUid, targetName) => {
+            if(!confirm(`Permanently BAN ${targetName}?`)) return;
+            try {
+                await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'banned', targetUid), {
+                    uid: targetUid,
+                    name: targetName,
+                    bannedAt: serverTimestamp(),
+                    bannedBy: state.username
+                });
+                await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'commands'), {
+                    type: 'kick',
+                    targetUid: targetUid,
+                    timestamp: serverTimestamp()
+                });
+                alert("User banned and kicked.");
+                openAdminPanel();
+            } catch(e) { 
+                console.error(e);
+                alert("Ban failed: " + e.message); 
+            }
+        };
+
+        window.unbanUser = async (targetUid) => {
+            if(!confirm("Unban this user?")) return;
+            try {
+                await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'banned', targetUid));
+                alert("User unbanned.");
+                openAdminPanel();
+            } catch(e) { alert(e.message); }
+        };
+
+        // --- Logic & Helpers ---
+
+        function containsProfanity(text) {
+            const lower = text.toLowerCase();
+            return BAD_WORDS.some(word => lower.includes(word));
+        }
+
+        window.checkSecretCode = (input) => {
+            const val = input.value;
+            const btn = document.getElementById('clear-chat-btn');
+            
+            if (btn && val.toLowerCase().trim() === 'chat') btn.classList.remove('hidden');
+
+            // Admin Code Instant Trigger
+            if (val.includes(ADMIN_CODE)) {
+                state.isAdmin = true;
+                openAdminPanel();
+                input.value = '';
+                render(); // Re-render to show admin sidebar channel
+            }
+        };
+
+        async function resolveUser(input) {
+            if (!input) return null;
+            const searchTerm = input.trim();
+            const q = query(
+                collection(db, 'artifacts', appId, 'public', 'data', 'presence'),
+                where('username', '==', searchTerm),
+                limit(1)
+            );
+            const snap = await getDocs(q);
+            if (!snap.empty) {
+                const data = snap.docs[0].data();
+                return { uid: data.uid, name: data.username };
+            }
+            const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'presence', searchTerm);
+            const docSnap = await getDoc(docRef);
+            if (docSnap.exists()) {
+                const data = docSnap.data();
+                return { uid: data.uid, name: data.username };
+            }
+            return null;
+        }
+
+        // --- Actions ---
+
+        window.handleJoin = async (e) => {
+            e.preventDefault();
+            const input = document.getElementById('username-input');
+            const name = input.value.trim();
+            if (!name) return;
+
+            initAudio(); 
+
+            state.isJoining = true;
+            state.joinError = '';
+            render(); 
+            requestNotificationPermission();
+
+            try {
+                const fiveMinAgo = new Date(Date.now() - 5 * 60 * 1000);
+                const q = query(
+                    collection(db, 'artifacts', appId, 'public', 'data', 'presence'),
+                    where('lastActive', '>=', Timestamp.fromDate(fiveMinAgo))
+                );
+                const snap = await getDocs(q);
+                const activeCount = snap.docs.filter(d => d.id !== state.user.uid).length;
+
+                if (activeCount >= MAX_CONCURRENT_USERS) {
+                    state.joinError = `Server full (${activeCount}/${MAX_CONCURRENT_USERS}).`;
+                    state.isJoining = false;
+                    render();
+                    return;
+                }
+                
+                // Initial ban check
+                if (state.user) {
+                     const banRef = doc(db, 'artifacts', appId, 'public', 'data', 'banned', state.user.uid);
+                     const banSnap = await getDoc(banRef);
+                     if (banSnap.exists()) {
+                         state.isBanned = true;
+                         // We don't throw error, we allow "join" but render banned screen
+                     }
+                }
+
+                state.username = name;
+                localStorage.setItem('chat_username', name);
+                
+                if (state.user && !state.peer) {
+                    initPeer(state.user.uid);
+                }
+
+                state.hasJoined = true;
+                state.isJoining = false;
+                setupListeners();
+                render(); 
+            } catch (err) {
+                console.error(err);
+                if (err.code === 'permission-denied') {
+                    state.joinError = "Database Locked. Update Firebase Rules.";
+                } else {
+                    state.joinError = "Connection failed. " + err.message;
+                }
+                state.isJoining = false;
+                render();
+            }
+        };
+
+        window.clearChat = async () => {
+            if (!confirm(`Clear "${state.activeChatName}"?`)) return;
+            try {
+                const q = query(collection(db, 'artifacts', appId, 'public', 'data', 'messages'), where('chatId', '==', state.activeChatId));
+                const snapshot = await getDocs(q);
+                const batch = writeBatch(db);
+                let count = 0;
+                snapshot.docs.forEach((doc) => { batch.delete(doc.ref); count++; });
+                if (count > 0) { await batch.commit(); alert(`Cleared ${count} messages.`); } else { alert("Empty."); }
+            } catch (err) { console.error("Clear error:", err); alert(err.message); }
+        };
+
+        window.handleSendMessage = async (e) => {
+            e.preventDefault();
+            const input = document.getElementById('message-input');
+            const text = input.value.trim();
+            if (!text || !state.user) return;
+
+            // Admin Trigger Fallback
+            if (text === ADMIN_CODE) {
+                input.value = '';
+                state.isAdmin = true;
+                openAdminPanel();
+                render(); // ensure admin chat shows
+                return;
+            }
+
+            if (containsProfanity(text)) {
+                alert("Profanity blocked.");
+                return;
+            }
+            if (state.dailyMessageCount >= MAX_DAILY_MESSAGES) {
+                alert("Daily limit reached.");
+                return;
+            }
+
+            input.value = ''; 
+            state.dailyMessageCount++;
+            renderUserFooter();
+
+            try {
+                await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'messages'), {
+                    text: text,
+                    createdAt: serverTimestamp(),
+                    uid: state.user.uid,
+                    chatId: state.activeChatId,
+                    senderName: state.username
+                });
+
+                if (state.messages.length >= MAX_CHAT_HISTORY) {
+                    const numToDelete = (state.messages.length + 1) - MAX_CHAT_HISTORY;
+                    if (numToDelete > 0) {
+                        const messagesToDelete = state.messages.slice(0, numToDelete);
+                        const batch = writeBatch(db);
+                        messagesToDelete.forEach(msg => {
+                            const ref = doc(db, 'artifacts', appId, 'public', 'data', 'messages', msg.id);
+                            batch.delete(ref);
+                        });
+                        await batch.commit().catch(e => console.log("Cleanup overlap:", e));
+                    }
+                }
+
+                if (state.activeChatId !== 'global') {
+                    const chatRef = doc(db, 'artifacts', appId, 'public', 'data', 'chats', state.activeChatId);
+                    try {
+                        // Ensure Support Channel exists if posting to it
+                        if (state.activeChatId === SUPPORT_CHAT_ID) {
+                            await setDoc(chatRef, {
+                                type: 'support',
+                                name: 'Admin Support',
+                                lastMessage: text,
+                                lastSender: state.user.uid,
+                                lastUpdated: serverTimestamp()
+                            }, {merge: true});
+                        } else {
+                            await updateDoc(chatRef, {
+                                lastMessage: text,
+                                lastSender: state.user.uid,
+                                lastUpdated: serverTimestamp()
+                            });
+                        }
+                    } catch (e) { console.log(e); }
+                }
+            } catch (err) {
+                console.error("Send error:", err);
+                state.dailyMessageCount--;
+                renderUserFooter();
+                alert(err.message);
+            }
+        };
+
+        // --- BANNED / APPEAL LOGIC ---
+
+        window.enterAppealMode = () => {
+            state.isAppealing = true;
+            render();
+        };
+
+        window.exitAppealMode = () => {
+            state.isAppealing = false;
+            render();
+        };
+
+        // --- Other Window Actions ---
+
+        window.createChat = async (targetUid, targetName) => {
+            if (!state.user) return;
+            const existing = state.myChats.find(c => c.participants.includes(targetUid) && (!c.type || c.type === 'dm'));
+            if (existing) {
+                switchChat(existing.id, targetName, 'dm');
+                closeModals();
+                return;
+            }
+            try {
+                const docRef = await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'chats'), {
+                    participants: [state.user.uid, targetUid],
+                    type: 'dm',
+                    createdAt: serverTimestamp(),
+                    names: { [state.user.uid]: state.username, [targetUid]: targetName }
+                });
+                switchChat(docRef.id, targetName, 'dm');
+                closeModals();
+            } catch (err) { alert(err.message); }
+        };
+
+        window.createChannel = async () => {
+            const input = document.getElementById('channel-name-input');
+            const name = input.value.trim();
+            if (!name || !state.user) return;
+            if (containsProfanity(name)) { alert("Bad name."); return; }
+            try {
+                const docRef = await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'chats'), {
+                    participants: [state.user.uid],
+                    type: 'channel',
+                    name: name,
+                    owner: state.user.uid,
+                    createdAt: serverTimestamp()
+                });
+                switchChat(docRef.id, name, 'channel');
+                closeModals();
+            } catch (err) { alert(err.message); }
+        }
+
+        window.inviteMember = async () => {
+            const input = document.getElementById('invite-id-input');
+            const userInput = input.value.trim();
+            if (!userInput || !state.user) return;
+            const targetUser = await resolveUser(userInput);
+            if (!targetUser) { alert("User not found."); return; }
+            try {
+                const chatRef = doc(db, 'artifacts', appId, 'public', 'data', 'chats', state.activeChatId);
+                await updateDoc(chatRef, { participants: arrayUnion(targetUser.uid) });
+                alert(`Invited ${targetUser.name}!`);
+                closeModals();
+            } catch (err) { alert(err.message); }
+        }
+
+        window.saveContact = async () => {
+            const idInput = document.getElementById('contact-id-input');
+            const nameInput = document.getElementById('contact-name-input');
+            const userInput = idInput.value.trim();
+            const nickname = nameInput.value.trim();
+            if (!userInput) return;
+            const targetUser = await resolveUser(userInput);
+            if (!targetUser) { alert("User not found."); return; }
+            try {
+                await addDoc(collection(db, 'artifacts', appId, 'users', state.user.uid, 'contacts'), {
+                    uid: targetUser.uid,
+                    name: nickname || targetUser.name,
+                    addedAt: serverTimestamp()
+                });
+                closeModals();
+            } catch (err) { alert(err.message); }
+        };
+
+        window.submitDirectChat = async () => {
+            const input = document.getElementById('direct-chat-id');
+            const userInput = input.value.trim();
+            if (!userInput) return;
+            const targetUser = await resolveUser(userInput);
+            if (!targetUser) { alert("User not found."); return; }
+            createChat(targetUser.uid, targetUser.name);
+        };
+
+        // --- Navigation ---
+
+        window.switchTab = (tab) => {
+            state.activeTab = tab;
+            renderSidebarContent();
+            updateTabStyles();
+        };
+
+        window.switchChat = (id, name, type) => {
+            state.activeChatId = id;
+            state.activeChatName = name;
+            state.activeChatType = type || 'global';
+            state.unreadChats.delete(id);
+            renderSidebarContent(); 
+            setupListeners();
+            if (window.innerWidth < 768) {
+                state.isSidebarOpen = false;
+                render();
+            } else {
+                renderChatHeader();
+            }
+        };
+
+        window.toggleSidebar = () => {
+            state.isSidebarOpen = !state.isSidebarOpen;
+            const sidebar = document.getElementById('sidebar');
+            renderApp(); 
+        };
+
+        window.copyId = () => {
+            navigator.clipboard.writeText(state.user.uid);
+            const btn = document.getElementById('copy-btn');
+            btn.innerHTML = `<i data-lucide="check" class="w-3 h-3 text-green-500"></i>`;
+            lucide.createIcons();
+            setTimeout(() => {
+                btn.innerHTML = `<i data-lucide="copy" class="w-3 h-3"></i>`;
+                lucide.createIcons();
+            }, 2000);
+        };
+
+        // --- Modals ---
+        
+        window.openDirectChatModal = () => document.getElementById('direct-chat-modal').classList.remove('hidden');
+        window.openAddContactModal = () => document.getElementById('add-contact-modal').classList.remove('hidden');
+        window.openCreateChannelModal = () => document.getElementById('create-channel-modal').classList.remove('hidden');
+        window.openInviteModal = () => document.getElementById('invite-modal').classList.remove('hidden');
+
+        window.closeModals = () => {
+            document.querySelectorAll('.modal').forEach(m => m.classList.add('hidden'));
+            ['contact-id-input', 'contact-name-input', 'direct-chat-id', 'channel-name-input', 'invite-id-input'].forEach(id => {
+                const el = document.getElementById(id);
+                if(el) el.value = '';
+            });
+        };
+
+        // --- Data Listeners ---
+
+        function setupListeners() {
+            state.unsubscribes.forEach(unsub => unsub());
+            state.unsubscribes = [];
+
+            if (!state.user || !state.hasJoined) return;
+
+            // 1. Messages Listener
+            const msgsQuery = query(
+                collection(db, 'artifacts', appId, 'public', 'data', 'messages'),
+                where('chatId', '==', state.activeChatId)
+            );
+
+            const unsubMsgs = onSnapshot(msgsQuery, (snapshot) => {
+                let msgs = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                msgs.sort((a, b) => {
+                    const t1 = a.createdAt ? a.createdAt.seconds : Number.MAX_SAFE_INTEGER; 
+                    const t2 = b.createdAt ? b.createdAt.seconds : Number.MAX_SAFE_INTEGER;
+                    return t1 - t2;
+                });
+                state.messages = msgs;
+                snapshot.docChanges().forEach((change) => {
+                    if (change.type === "added") {
+                        const data = change.doc.data();
+                        if (data.uid !== state.user.uid && !change.doc.metadata.hasPendingWrites) {
+                            sendNotification(`New message from ${data.senderName}`, data.text);
+                        }
+                    }
+                });
+                renderMessages();
+                setTimeout(scrollToBottom, 100);
+            }, (error) => console.log("Msg error", error));
+            state.unsubscribes.push(unsubMsgs);
+
+            // 2. Chats Listener
+            const chatsQuery = query(
+                collection(db, 'artifacts', appId, 'public', 'data', 'chats'),
+                where('participants', 'array-contains', state.user.uid)
+            );
+
+            const unsubChats = onSnapshot(chatsQuery, (snapshot) => {
+                state.myChats = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                snapshot.docChanges().forEach((change) => {
+                    if (change.type === "modified") {
+                        const data = change.doc.data();
+                        if (change.doc.id !== state.activeChatId && data.lastSender !== state.user.uid) {
+                            state.unreadChats.add(change.doc.id);
+                            // ... notification logic
+                        }
+                    }
+                });
+                renderSidebarContent();
+            });
+            state.unsubscribes.push(unsubChats);
+
+            // 3. Contacts
+            const contactsQuery = query(collection(db, 'artifacts', appId, 'users', state.user.uid, 'contacts'));
+            const unsubContacts = onSnapshot(contactsQuery, (snapshot) => {
+                const fetchedContacts = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                state.contacts = fetchedContacts;
+                localStorage.setItem('chat_contacts', JSON.stringify(fetchedContacts));
+                renderSidebarContent();
+            });
+            state.unsubscribes.push(unsubContacts);
+
+            // 4. COMMANDS LISTENER (Public Channel for Kicks/Remove)
+            const commandsQuery = query(
+                collection(db, 'artifacts', appId, 'public', 'data', 'commands'),
+                orderBy('timestamp', 'desc'),
+                limit(5) 
+            );
+            const unsubCommands = onSnapshot(commandsQuery, (snapshot) => {
+                snapshot.docChanges().forEach((change) => {
+                    if (change.type === 'added') {
+                        const data = change.doc.data();
+                        const cmdTime = data.timestamp ? data.timestamp.toMillis() : Date.now();
+                        if (Date.now() - cmdTime > 10000) return;
+
+                        if (data.targetUid === state.user.uid) {
+                            if (data.type === 'kick') {
+                                alert("You have been kicked by an admin.");
+                                window.location.reload();
+                            } else if (data.type === 'remove') {
+                                alert("You have been removed from the application.");
+                                localStorage.removeItem('chat_username');
+                                state.hasJoined = false;
+                                state.username = '';
+                                state.messages = [];
+                                render();
+                            }
+                        }
+                    }
+                });
+            });
+            state.unsubscribes.push(unsubCommands);
+
+            // 5. GLOBAL BAN CHECK
+            const banRef = doc(db, 'artifacts', appId, 'public', 'data', 'banned', state.user.uid);
+            getDoc(banRef).then(snap => {
+                if (snap.exists()) {
+                    state.isBanned = true;
+                    render();
+                }
+            });
+            const unsubBan = onSnapshot(banRef, (snap) => {
+                if(snap.exists()) {
+                     state.isBanned = true;
+                     render();
+                } else {
+                    if (state.isBanned) {
+                        state.isBanned = false;
+                        state.isAppealing = false;
+                        window.location.reload(); 
+                    }
+                }
+            });
+            state.unsubscribes.push(unsubBan);
+
+            checkDailyLimit();
+            startHeartbeat();
+        }
+
+        async function checkDailyLimit() {
+            const today = new Date();
+            today.setHours(0, 0, 0, 0);
+            const q = query(
+                collection(db, 'artifacts', appId, 'public', 'data', 'messages'),
+                where('uid', '==', state.user.uid)
+            );
+            try {
+                const snap = await getDocs(q);
+                const count = snap.docs.filter(doc => {
+                    const data = doc.data();
+                    if (!data.createdAt) return true;
+                    return data.createdAt.toDate() >= today;
+                }).length;
+                state.dailyMessageCount = count;
+                renderUserFooter();
+            } catch (err) { console.error("Error checking limits:", err); }
+        }
+
+        function startHeartbeat() {
+            const send = async () => {
+                if(!state.user) return;
+                try {
+                    await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'presence', state.user.uid), {
+                        uid: state.user.uid,
+                        username: state.username,
+                        lastActive: serverTimestamp()
+                    }, { merge: true });
+                } catch (err) { console.error("Heartbeat error", err); }
+            };
+            send();
+            setInterval(send, 60000);
+        }
+
+        function renderAdminModal() {
+            if (!state.isAdmin) return '';
+            
+            const visibilityClass = state.showAdminPanel ? '' : 'hidden';
+
+            const activeRows = state.activeUsers.map(u => {
+                if (u.uid === state.user.uid) return '';
+                return `
+                    <div class="flex items-center justify-between p-3 bg-slate-800 rounded-lg">
+                        <div class="flex items-center gap-2 overflow-hidden">
+                            <div class="w-8 h-8 rounded-full bg-slate-700 flex items-center justify-center text-xs font-bold">${(u.username || 'U').charAt(0)}</div>
+                            <div class="truncate">
+                                <div class="font-medium text-slate-200">${u.username || 'Unknown'}</div>
+                                <div class="text-[10px] text-slate-500 font-mono">${u.uid.slice(0,6)}...</div>
+                            </div>
+                        </div>
+                        <div class="flex gap-2">
+                            <button onclick="kickUser('${u.uid}')" class="px-3 py-1 bg-amber-600/20 text-amber-500 hover:bg-amber-600/40 rounded text-xs font-medium">Kick</button>
+                            <button onclick="removeUser('${u.uid}')" class="px-3 py-1 bg-slate-600/20 text-slate-400 hover:bg-slate-600/40 rounded text-xs font-medium">Remove</button>
+                            <button onclick="banUser('${u.uid}', '${u.username}')" class="px-3 py-1 bg-red-600/20 text-red-500 hover:bg-red-600/40 rounded text-xs font-medium">Ban</button>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+
+            const bannedRows = state.bannedUsers.map(u => `
+                 <div class="flex items-center justify-between p-3 bg-red-900/20 border border-red-900/50 rounded-lg">
+                        <div class="flex items-center gap-2 overflow-hidden">
+                            <div class="w-8 h-8 rounded-full bg-red-900 flex items-center justify-center text-xs font-bold text-red-200">${u.name.charAt(0)}</div>
+                            <div class="truncate">
+                                <div class="font-medium text-red-200">${u.name}</div>
+                                <div class="text-[10px] text-red-400 font-mono">Banned by ${u.bannedBy || 'Admin'}</div>
+                            </div>
+                        </div>
+                        <button onclick="unbanUser('${u.uid}')" class="px-3 py-1 bg-green-600/20 text-green-500 hover:bg-green-600/40 rounded text-xs font-medium">Unban</button>
+                    </div>
+            `).join('');
+
+            return `
+                <div id="admin-modal" class="modal ${visibilityClass} fixed inset-0 z-[60] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
+                    <div class="bg-slate-900 border border-slate-700 w-full max-w-2xl max-h-[80vh] rounded-xl shadow-2xl overflow-hidden flex flex-col">
+                        <div class="flex justify-between items-center p-4 border-b border-slate-700 bg-slate-900">
+                            <h3 class="text-lg font-bold text-red-400 flex items-center gap-2"><i data-lucide="shield-alert" class="w-5 h-5"></i> Admin Control Panel</h3>
+                            <button onclick="closeAdminPanel()" class="text-slate-400 hover:text-white"><i data-lucide="x" class="w-5 h-5"></i></button>
+                        </div>
+                        <div class="flex-1 overflow-y-auto p-6 space-y-6">
+                            <div><h4 class="text-sm font-bold text-slate-400 uppercase tracking-wider mb-3">Active Users</h4><div class="space-y-2">${activeRows || '<div class="text-slate-600 text-sm italic">No other active users found (Try refreshing).</div>'}</div></div>
+                            <div><h4 class="text-sm font-bold text-slate-400 uppercase tracking-wider mb-3">Banned Users</h4><div class="space-y-2">${bannedRows || '<div class="text-slate-600 text-sm italic">No banned users.</div>'}</div></div>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+
+        function renderModals() {
+            return `
+                <div id="add-contact-modal" class="modal hidden fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+                    <div class="bg-slate-900 border border-slate-700 w-full max-w-md rounded-xl shadow-2xl overflow-hidden m-4">
+                        <div class="flex justify-between items-center p-4 border-b border-slate-700"><h3 class="text-lg font-bold text-white">Add Contact</h3><button onclick="closeModals()" class="text-slate-400 hover:text-white"><i data-lucide="x" class="w-5 h-5"></i></button></div>
+                        <div class="p-4 space-y-4">
+                            <div><label class="block text-xs font-medium text-slate-400 mb-1">Username</label><input id="contact-id-input" type="text" placeholder="e.g. Alice" class="w-full bg-slate-800 border border-slate-700 text-slate-100 px-4 py-2 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-base"></div>
+                            <div><label class="block text-xs font-medium text-slate-400 mb-1">Nickname (Optional)</label><input id="contact-name-input" type="text" placeholder="Custom name" class="w-full bg-slate-800 border border-slate-700 text-slate-100 px-4 py-2 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-base"></div>
+                            <div class="pt-2 flex justify-end gap-2"><button onclick="closeModals()" class="px-4 py-2 text-slate-300 hover:text-white">Cancel</button><button onclick="saveContact()" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg">Save</button></div>
+                        </div>
+                    </div>
+                </div>
+                <div id="direct-chat-modal" class="modal hidden fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+                    <div class="bg-slate-900 border border-slate-700 w-full max-w-md rounded-xl shadow-2xl overflow-hidden m-4">
+                        <div class="flex justify-between items-center p-4 border-b border-slate-700"><h3 class="text-lg font-bold text-white">New Direct Message</h3><button onclick="closeModals()" class="text-slate-400 hover:text-white"><i data-lucide="x" class="w-5 h-5"></i></button></div>
+                        <div class="p-4 space-y-4">
+                            <p class="text-sm text-slate-400">Enter a Username to start a conversation.</p>
+                            <div><label class="block text-xs font-medium text-slate-400 mb-1">Username</label><input id="direct-chat-id" type="text" placeholder="e.g. Bob" class="w-full bg-slate-800 border border-slate-700 text-slate-100 px-4 py-2 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-base"></div>
+                            <div class="pt-2 flex justify-end gap-2"><button onclick="closeModals()" class="px-4 py-2 text-slate-300 hover:text-white">Cancel</button><button onclick="submitDirectChat()" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg">Start Chat</button></div>
+                        </div>
+                    </div>
+                </div>
+                <div id="create-channel-modal" class="modal hidden fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+                    <div class="bg-slate-900 border border-slate-700 w-full max-w-md rounded-xl shadow-2xl overflow-hidden m-4">
+                        <div class="flex justify-between items-center p-4 border-b border-slate-700"><h3 class="text-lg font-bold text-white">Create Channel</h3><button onclick="closeModals()" class="text-slate-400 hover:text-white"><i data-lucide="x" class="w-5 h-5"></i></button></div>
+                        <div class="p-4 space-y-4">
+                            <p class="text-sm text-slate-400">Channels are permanent rooms where you can invite multiple people.</p>
+                            <div><label class="block text-xs font-medium text-slate-400 mb-1">Channel Name</label><input id="channel-name-input" type="text" placeholder="e.g. Project Team" class="w-full bg-slate-800 border border-slate-700 text-slate-100 px-4 py-2 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-base"></div>
+                            <div class="pt-2 flex justify-end gap-2"><button onclick="closeModals()" class="px-4 py-2 text-slate-300 hover:text-white">Cancel</button><button onclick="createChannel()" class="px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-lg">Create</button></div>
+                        </div>
+                    </div>
+                </div>
+                <div id="invite-modal" class="modal hidden fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+                    <div class="bg-slate-900 border border-slate-700 w-full max-w-md rounded-xl shadow-2xl overflow-hidden m-4">
+                        <div class="flex justify-between items-center p-4 border-b border-slate-700"><h3 class="text-lg font-bold text-white">Invite Person</h3><button onclick="closeModals()" class="text-slate-400 hover:text-white"><i data-lucide="x" class="w-5 h-5"></i></button></div>
+                        <div class="p-4 space-y-4">
+                            <p class="text-sm text-slate-400">Add someone to this channel by their Username.</p>
+                            <div><label class="block text-xs font-medium text-slate-400 mb-1">Username</label><input id="invite-id-input" type="text" placeholder="e.g. Alice" class="w-full bg-slate-800 border border-slate-700 text-slate-100 px-4 py-2 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-base"></div>
+                            <div class="pt-2 flex justify-end gap-2"><button onclick="closeModals()" class="px-4 py-2 text-slate-300 hover:text-white">Cancel</button><button onclick="inviteMember()" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg">Invite</button></div>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+
+        function updateTabStyles() {
+            ['global', 'chats', 'contacts'].forEach(t => {
+                const btn = document.getElementById(`tab-${t}`);
+                if (state.activeTab === t) {
+                    btn.className = "flex-1 py-2 text-sm font-medium rounded-md transition-all bg-slate-800 text-white shadow-sm relative";
+                } else {
+                    btn.className = "flex-1 py-2 text-sm font-medium rounded-md transition-all text-slate-400 hover:text-slate-200 relative";
+                }
+            });
+        }
+
+        function renderSidebarContent() {
+            const container = document.getElementById('sidebar-content');
+            if (!container) return;
+
+            let html = '';
+
+            if (state.activeTab === 'global') {
+                const isActive = state.activeChatId === 'global';
+                html = `
+                    <div onclick="switchChat('global', 'Global Chat', 'global')" class="cursor-pointer w-full flex items-center gap-3 p-3 rounded-xl transition-all ${isActive ? 'bg-blue-600 text-white shadow-md shadow-blue-500/20' : 'hover:bg-slate-800 text-slate-300'}">
+                        <div class="p-2 rounded-lg ${isActive ? 'bg-white/20' : 'bg-slate-800'}"><i data-lucide="hash" class="w-5 h-5"></i></div>
+                        <div class="text-left">
+                            <div class="font-semibold">Global Chat</div>
+                            <div class="text-xs opacity-70">Public room</div>
+                        </div>
+                    </div>
+                `;
+                
+                // Show Admin Support Channel if Admin
+                if (state.isAdmin) {
+                    const isSupportActive = state.activeChatId === SUPPORT_CHAT_ID;
+                    html += `
+                        <div onclick="switchChat('${SUPPORT_CHAT_ID}', 'Admin Support', 'channel')" class="mt-2 cursor-pointer w-full flex items-center gap-3 p-3 rounded-xl transition-all ${isSupportActive ? 'bg-red-900/50 text-white shadow-md border border-red-500/30' : 'hover:bg-slate-800 text-red-400'}">
+                            <div class="p-2 rounded-lg ${isSupportActive ? 'bg-red-800' : 'bg-slate-800'}"><i data-lucide="life-buoy" class="w-5 h-5"></i></div>
+                            <div class="text-left">
+                                <div class="font-semibold">Admin Support</div>
+                                <div class="text-xs opacity-70">Banned Appeals</div>
+                            </div>
+                        </div>
+                    `;
+                }
+
+            } else if (state.activeTab === 'chats') {
+                html += `
+                    <div class="flex gap-2 mb-3">
+                        <button onclick="openDirectChatModal()" class="flex-1 flex items-center justify-center gap-2 py-2 border border-slate-800 rounded-lg hover:bg-slate-800 text-slate-400 hover:text-white transition-colors text-xs font-medium">
+                            <i data-lucide="user-plus" class="w-3 h-3"></i> DM
+                        </button>
+                        <button onclick="openCreateChannelModal()" class="flex-1 flex items-center justify-center gap-2 py-2 border border-slate-800 rounded-lg hover:bg-slate-800 text-slate-400 hover:text-white transition-colors text-xs font-medium">
+                            <i data-lucide="plus-circle" class="w-3 h-3"></i> Channel
+                        </button>
+                    </div>
+                `;
+                
+                if (state.myChats.length === 0) {
+                    html += `<div class="text-center p-6 text-slate-500 text-sm"><p>No chats yet.</p></div>`;
+                } else {
+                    state.myChats.forEach(chat => {
+                        const isChannel = chat.type === 'channel';
+                        const isActive = state.activeChatId === chat.id;
+                        const isUnread = state.unreadChats.has(chat.id);
+                        const isOwner = isChannel && chat.owner === state.user.uid;
+                        
+                        let displayName = "Unknown";
+                        let subText = chat.lastMessage || (isChannel ? "Channel" : "Direct Message");
+                        let icon = "users";
+                        let actionBtn = '';
+
+                        if (isChannel) {
+                            displayName = chat.name || "Unnamed Channel";
+                            icon = "hash";
+                            if (isOwner) {
+                                actionBtn = `<button onclick="event.stopPropagation(); deleteChannel('${chat.id}', '${displayName.replace(/'/g, "\\'")}')" class="p-2 text-slate-500 hover:text-red-400 hover:bg-red-500/10 rounded-lg transition-colors" title="Delete Channel"><i data-lucide="trash-2" class="w-4 h-4"></i></button>`;
+                            } else {
+                                actionBtn = `<button onclick="event.stopPropagation(); hideChat('${chat.id}', true)" class="p-2 text-slate-500 hover:text-red-400 hover:bg-slate-700/50 rounded-lg transition-colors" title="Leave Channel"><i data-lucide="log-out" class="w-4 h-4"></i></button>`;
+                            }
+                        } else {
+                            const otherUid = chat.participants.find(p => p !== state.user.uid);
+                            displayName = chat.names && chat.names[otherUid] ? chat.names[otherUid] : `User ${otherUid?.slice(0,4)}`;
+                            actionBtn = `<button onclick="event.stopPropagation(); hideChat('${chat.id}', false)" class="p-2 text-slate-500 hover:text-red-400 hover:bg-slate-700/50 rounded-lg transition-colors" title="Hide Conversation"><i data-lucide="x" class="w-4 h-4"></i></button>`;
+                        }
+                        
+                        html += `
+                            <div onclick="switchChat('${chat.id}', '${displayName.replace(/'/g, "\\'")}', '${isChannel ? 'channel' : 'dm'}')" class="cursor-pointer w-full flex items-center gap-3 p-3 rounded-xl transition-all ${isActive ? 'bg-blue-600 text-white shadow-md shadow-blue-500/20' : 'hover:bg-slate-800 text-slate-300'} relative group">
+                                <div class="p-2 rounded-lg ${isActive ? 'bg-white/20' : 'bg-slate-800'} relative">
+                                    <i data-lucide="${icon}" class="w-5 h-5"></i>
+                                    ${isUnread ? `<span class="absolute -top-1 -right-1 w-3 h-3 bg-red-500 border-2 border-slate-900 rounded-full"></span>` : ''}
+                                </div>
+                                <div class="text-left flex-1 overflow-hidden">
+                                    <div class="font-semibold truncate ${isUnread ? 'text-white' : ''}">${displayName}</div>
+                                    <div class="text-xs opacity-70 truncate ${isUnread ? 'text-slate-300 font-medium' : ''}">${subText}</div>
+                                </div>
+                                <div class="flex items-center">
+                                    ${actionBtn}
+                                </div>
+                            </div>
+                        `;
+                    });
+                }
+            } else if (state.activeTab === 'contacts') {
+                html += `
+                    <button onclick="openAddContactModal()" class="w-full mb-4 flex items-center justify-center px-4 py-2 rounded-lg font-medium bg-slate-700 hover:bg-slate-600 text-slate-100 transition-all">
+                        <i data-lucide="user-plus" class="w-4 h-4 mr-2"></i> Add Contact
+                    </button>
+                `;
+                if (state.contacts.length === 0) {
+                    html += `<div class="text-center p-4 text-slate-500 text-sm">No contacts.</div>`;
+                } else {
+                    state.contacts.forEach(c => {
+                        html += `
+                            <div class="flex items-center justify-between p-3 bg-slate-900/50 border border-slate-800 rounded-xl hover:border-slate-700 transition-colors group">
+                                <div class="flex items-center gap-3 overflow-hidden">
+                                    <div class="w-8 h-8 rounded-full bg-gradient-to-br from-emerald-500 to-teal-600 flex items-center justify-center text-xs font-bold text-white">${c.name.charAt(0).toUpperCase()}</div>
+                                    <div class="truncate">
+                                        <div class="font-medium text-slate-200">${c.name}</div>
+                                        <div class="text-[10px] text-slate-500 font-mono truncate max-w-[100px]">${c.uid}</div>
+                                    </div>
+                                </div>
+                                <button onclick="createChat('${c.uid}', '${c.name}')" class="p-2 text-blue-400 hover:bg-blue-500/10 rounded-lg transition-colors opacity-0 group-hover:opacity-100 focus:opacity-100">
+                                    <i data-lucide="message-square" class="w-4 h-4"></i>
+                                </button>
+                            </div>
+                        `;
+                    });
+                }
+            }
+            container.innerHTML = html;
+            lucide.createIcons();
+        }
+
+        function renderUserFooter() {
+            const footer = document.getElementById('user-footer');
+            if(!footer) return;
+            
+            const notifIcon = state.notificationsEnabled ? 'bell' : 'bell-off';
+            const notifColor = state.notificationsEnabled ? 'text-indigo-400' : 'text-slate-500';
+            const bgIcon = state.backgroundMode ? 'moon' : 'sun';
+            const bgColor = state.backgroundMode ? 'text-yellow-400' : 'text-slate-500';
+
+            const adminBtn = state.isAdmin ? `
+                <button onclick="toggleAdminPanel()" class="p-2 hover:bg-slate-800 rounded-lg transition-colors text-red-500 animate-pulse" title="Admin Panel">
+                    <i data-lucide="shield-alert" class="w-4 h-4"></i>
+                </button>
+            ` : '';
+
+            footer.innerHTML = `
+                <div class="flex items-center gap-2">
+                    <div class="w-8 h-8 rounded-full bg-slate-700 flex items-center justify-center text-xs font-bold">${state.username.charAt(0).toUpperCase()}</div>
+                    <div class="flex-1 overflow-hidden">
+                        <div class="text-sm font-medium text-slate-200 truncate">${state.username}</div>
+                        <div class="text-xs text-slate-400 flex items-center gap-1">
+                            ${state.dailyMessageCount} / ${MAX_DAILY_MESSAGES} msgs
+                        </div>
+                    </div>
+                    ${adminBtn}
+                    <button onclick="toggleBackgroundMode()" class="p-2 hover:bg-slate-800 rounded-lg transition-colors ${bgColor}" title="${state.backgroundMode ? 'Disable Background Mode' : 'Enable Background Mode (Keep Alive)'}">
+                        <i data-lucide="${bgIcon}" class="w-4 h-4"></i>
+                    </button>
+                    <button onclick="toggleNotifications()" class="p-2 hover:bg-slate-800 rounded-lg transition-colors ${notifColor}" title="${state.notificationsEnabled ? 'Mute Notifications' : 'Enable Notifications'}">
+                        <i data-lucide="${notifIcon}" class="w-4 h-4"></i>
+                    </button>
+                </div>
+            `;
+            if (state.dailyMessageCount >= MAX_DAILY_MESSAGES) {
+                document.getElementById('limit-warning')?.classList.remove('hidden');
+            }
+            lucide.createIcons();
+        }
+
+        function renderChatHeader() {
+            const header = document.getElementById('chat-header');
+            if(!header) return;
+            let icon = 'hash';
+            let color = 'text-blue-500';
+            
+            if (state.activeChatType === 'dm') {
+                icon = 'users';
+                color = 'text-purple-500';
+            } else if (state.activeChatType === 'channel') {
+                icon = 'hash';
+                color = 'text-emerald-500';
+            }
+
+            let inviteBtn = '';
+            if (state.activeChatType === 'channel') {
+                inviteBtn = `
+                    <button onclick="openInviteModal()" class="p-2 hover:bg-slate-800 rounded-lg text-emerald-400 hover:text-emerald-300 transition-colors ml-auto" title="Invite Person">
+                        <i data-lucide="user-plus" class="w-5 h-5"></i>
+                    </button>
+                `;
+            }
+            
+            let callBtn = '';
+            if (state.activeChatId !== 'global') {
+                const isChannel = state.activeChatType === 'channel';
+                const callIcon = isChannel ? 'headphones' : 'video';
+                const callTitle = isChannel ? 'Join Voice' : 'Start Call';
+                
+                const isActiveColor = (isChannel && state.channelVoiceActive) ? 'text-green-400 hover:text-green-300' : 'text-slate-400 hover:text-white';
+
+                callBtn = `
+                    <button onclick="handleVoiceAction()" class="p-2 hover:bg-slate-800 rounded-lg transition-colors ml-2 ${isActiveColor}" title="${callTitle}">
+                        <i data-lucide="${callIcon}" class="w-5 h-5"></i>
+                    </button>
+                `;
+            }
+
+            header.innerHTML = `
+                <div class="flex items-center gap-3 w-full">
+                    <button onclick="toggleSidebar()" class="p-2 -ml-2 hover:bg-slate-800 rounded-lg text-slate-400 hover:text-white transition-colors">
+                        <i data-lucide="menu" class="w-5 h-5"></i>
+                    </button>
+                    <div class="h-6 w-px bg-slate-800 mx-1"></div>
+                    <i data-lucide="${icon}" class="${color} w-5 h-5"></i>
+                    <div class="flex-1">
+                        <h2 class="font-bold text-lg text-slate-100">${state.activeChatName}</h2>
+                        <p class="text-xs text-slate-500">${state.activeChatType === 'global' ? 'Public Room' : (state.activeChatType === 'channel' ? 'Private Channel' : 'Direct Message')}</p>
+                    </div>
+                    ${inviteBtn}
+                    ${callBtn}
+                    <!-- Admin Clear Button (Hidden) -->
+                    <button id="clear-chat-btn" onclick="clearChat()" class="hidden p-2 hover:bg-red-500/20 rounded-lg text-red-400 hover:text-red-300 transition-colors ml-2" title="Clear Chat History">
+                        <i data-lucide="trash-2" class="w-5 h-5"></i>
+                    </button>
+                </div>
+            `;
+            lucide.createIcons();
+        }
+
+        function renderMessages() {
+            const container = document.getElementById('messages-container');
+            if(!container) return;
+
+            if (state.messages.length === 0) {
+                container.innerHTML = `
+                    <div class="flex flex-col items-center justify-center h-full text-slate-600 opacity-50">
+                        <i data-lucide="message-square" class="w-12 h-12 mb-4"></i>
+                        <p>No messages yet. Start the conversation!</p>
+                    </div>`;
+            } else {
+                let html = '';
+                state.messages.forEach((msg, index) => {
+                    const isMe = msg.uid === state.user.uid;
+                    const prevMsg = state.messages[index - 1];
+                    const showHeader = !prevMsg || prevMsg.uid !== msg.uid;
+
+                    html += `
+                        <div class="flex flex-col ${isMe ? 'items-end' : 'items-start'}">
+                            ${showHeader ? `<span class="text-xs text-slate-500 mb-1 px-1 ${isMe ? 'mr-1' : 'ml-1'}">${isMe ? 'You' : msg.senderName || 'Unknown'}</span>` : ''}
+                            <div class="max-w-[80%] px-4 py-2 rounded-2xl break-words shadow-sm ${isMe ? 'bg-blue-600 text-white rounded-tr-sm' : 'bg-slate-800 text-slate-200 rounded-tl-sm'}">
+                                ${msg.text}
+                            </div>
+                        </div>
+                    `;
+                });
+                container.innerHTML = html;
+            }
+            lucide.createIcons();
+        }
+
+        function renderBannedScreen() {
+            root.innerHTML = `
+                <div class="flex h-[100dvh] w-full items-center justify-center bg-red-950 text-white p-6 font-sans">
+                    <div class="max-w-md text-center">
+                        <div class="w-20 h-20 bg-red-900 rounded-full flex items-center justify-center mx-auto mb-6 shadow-2xl animate-bounce">
+                            <i data-lucide="ban" class="w-10 h-10 text-red-200"></i>
+                        </div>
+                        <h1 class="text-3xl font-bold mb-4">Account Banned</h1>
+                        <p class="text-red-200 mb-8 text-lg">You have been banned from this server. Access to standard channels is restricted.</p>
+                        
+                        <div class="bg-red-900/30 border border-red-800 p-4 rounded-xl mb-8">
+                            <p class="text-sm text-red-300">If you believe this is a mistake, you may contact the administration team via the support chat.</p>
+                        </div>
+
+                        <button onclick="enterAppealMode()" class="w-full bg-white text-red-900 font-bold py-4 rounded-xl hover:bg-red-100 transition-colors flex items-center justify-center gap-2 shadow-xl">
+                            <i data-lucide="life-buoy" class="w-5 h-5"></i>
+                            Contact Support Chat
+                        </button>
+                    </div>
+                </div>
+            `;
+            lucide.createIcons();
+        }
+
+        function renderAppealChat() {
+            // Force set active chat to support
+            if (!state.activeChatId || state.activeChatId !== SUPPORT_CHAT_ID) {
+                state.activeChatId = SUPPORT_CHAT_ID;
+                state.activeChatName = "Support & Appeals";
+                state.activeChatType = "channel";
+                setupListeners();
+            }
+
+            root.innerHTML = `
+                <div class="flex h-[100dvh] w-full bg-slate-950 text-slate-200 font-sans flex-col">
+                    <div class="h-16 border-b border-slate-800 flex items-center justify-between px-6 bg-red-900/20">
+                        <div class="flex items-center gap-3">
+                            <i data-lucide="shield-alert" class="text-red-500 w-6 h-6"></i>
+                            <div>
+                                <h2 class="font-bold text-lg text-white">Admin Support</h2>
+                                <p class="text-xs text-red-400">Appeal Mode</p>
+                            </div>
+                        </div>
+                        <button onclick="exitAppealMode()" class="text-slate-400 hover:text-white text-sm">Exit</button>
+                    </div>
+
+                    <div id="messages-container" class="flex-1 overflow-y-auto p-6 space-y-6 scrollbar-thin scrollbar-thumb-slate-800 scrollbar-track-transparent">
+                        <!-- Messages loaded by listeners -->
+                    </div>
+
+                    <div class="p-4 bg-slate-900 border-t border-slate-800 pb-safe">
+                        <form onsubmit="handleSendMessage(event)" class="flex gap-2 max-w-4xl mx-auto">
+                            <input id="message-input" type="text" placeholder="Explain your situation..." class="flex-1 bg-slate-800 text-white border border-red-900/30 rounded-xl px-4 py-3 focus:ring-2 focus:ring-red-500 focus:outline-none placeholder-slate-500">
+                            <button type="submit" class="bg-red-600 hover:bg-red-700 text-white p-3 rounded-xl transition-colors"><i data-lucide="send" class="w-5 h-5"></i></button>
+                        </form>
+                    </div>
+                </div>
+            `;
+            renderMessages();
+            lucide.createIcons();
+        }
+
+        function renderApp() {
+            const sidebarClass = state.isSidebarOpen 
+                ? 'w-[85vw] md:w-80 border-r translate-x-0' 
+                : 'w-0 border-r-0 -translate-x-full md:translate-x-0 md:w-0';
+
+            root.innerHTML = `
+                <div class="flex h-[100dvh] w-full bg-slate-950 text-slate-200 overflow-hidden font-sans selection:bg-blue-500/30 relative">
+                    <audio id="keep-alive-audio" loop>
+                        <source src="data:audio/mp3;base64,//NExAAAAANIAAAAAExBTUUzLjEwMKqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq//NExAAAAANIAAAAAExBTUUzLjEwMKqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq" type="audio/mpeg">
+                    </audio>
+
+                    <div onclick="toggleSidebar()" class="${state.isSidebarOpen ? 'block md:hidden' : 'hidden'} absolute inset-0 z-30 bg-black/60 backdrop-blur-sm transition-opacity duration-300"></div>
+
+                    <div id="sidebar" class="${sidebarClass} absolute md:relative z-40 h-full bg-slate-900 border-slate-800 flex flex-col shrink-0 transition-all duration-300 overflow-hidden shadow-2xl md:shadow-none">
+                        <div class="p-4 border-b border-slate-800 min-w-[20rem]">
+                            <div class="flex justify-between items-center mb-4">
+                                <h1 class="text-xl font-bold text-white flex items-center gap-2">
+                                    <div class="w-8 h-8 bg-gradient-to-tr from-blue-500 to-purple-600 rounded-lg flex items-center justify-center shadow-lg shadow-blue-500/20">
+                                        <i data-lucide="message-square" class="text-white w-4 h-4"></i>
+                                    </div>
+                                    Chat Space
+                                </h1>
+                                <button onclick="toggleSidebar()" class="md:hidden p-1 hover:bg-slate-800 rounded"><i data-lucide="x" class="w-5 h-5 text-slate-400"></i></button>
+                            </div>
+                            <div class="flex items-center gap-2 text-xs text-slate-500 bg-slate-950 p-2 rounded border border-slate-800">
+                                <span class="truncate flex-1 font-mono">ID: ${state.user.uid}</span>
+                                <button id="copy-btn" onclick="copyId()" class="hover:text-blue-400 transition-colors"><i data-lucide="copy" class="w-3 h-3"></i></button>
+                            </div>
+                        </div>
+                        <div class="flex p-2 gap-1 border-b border-slate-800 min-w-[20rem]">
+                            <button onclick="switchTab('global')" id="tab-global" class="flex-1 py-2 text-sm font-medium rounded-md transition-all text-slate-400 hover:text-slate-200 relative">Global</button>
+                            <button onclick="switchTab('chats')" id="tab-chats" class="flex-1 py-2 text-sm font-medium rounded-md transition-all text-slate-400 hover:text-slate-200 relative">Chats${state.unreadChats.size > 0 ? `<span class="absolute top-1 right-2 w-2 h-2 bg-red-500 rounded-full animate-pulse"></span>` : ''}</button>
+                            <button onclick="switchTab('contacts')" id="tab-contacts" class="flex-1 py-2 text-sm font-medium rounded-md transition-all text-slate-400 hover:text-slate-200">Contacts</button>
+                        </div>
+                        <div id="sidebar-content" class="flex-1 overflow-y-auto p-2 space-y-2 min-w-[20rem]"></div>
+                        <div id="user-footer" class="p-4 border-t border-slate-800 bg-slate-900/50 min-w-[20rem]"></div>
+                    </div>
+
+                    <div class="flex-1 flex flex-col bg-slate-950 relative w-full">
+                        ${state.dbError ? `<div class="bg-red-900/50 border-b border-red-500/30 p-2 text-center text-xs text-red-200 font-mono">${state.dbError}</div>` : ''}
+                        
+                        ${state.isCallActive ? `
+                        <div class="absolute inset-0 z-50 bg-black flex flex-col">
+                            <div class="flex-1 relative flex items-center justify-center">
+                                <video id="remote-video" autoplay playsinline class="w-full h-full object-cover"></video>
+                                <div class="absolute bottom-4 right-4 w-32 h-48 bg-slate-900 rounded-lg border border-slate-700 overflow-hidden shadow-2xl">
+                                    <video id="local-video" autoplay playsinline muted class="w-full h-full object-cover"></video>
+                                </div>
+                                <div class="absolute top-8 left-8 text-white bg-black/50 px-4 py-2 rounded-lg backdrop-blur-sm animate-pulse flex items-center gap-2">
+                                    <div class="w-2 h-2 bg-green-500 rounded-full"></div>
+                                    ${state.callStatus === 'connecting' ? 'Connecting...' : (state.callStatus === 'hosting' ? 'Waiting for others...' : 'Connected')}
+                                </div>
+                            </div>
+                            <div class="h-20 bg-slate-900 border-t border-slate-800 flex items-center justify-center gap-4">
+                                <button onclick="hangUp()" class="w-12 h-12 bg-red-600 hover:bg-red-700 rounded-full flex items-center justify-center text-white shadow-lg transition-all"><i data-lucide="phone-off" class="w-6 h-6"></i></button>
+                            </div>
+                        </div>` : ''}
+
+                        ${state.incomingCall ? `
+                        <div class="absolute inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm">
+                            <div class="bg-slate-900 border border-slate-700 p-8 rounded-2xl shadow-2xl flex flex-col items-center animate-in fade-in zoom-in duration-300">
+                                <div class="w-20 h-20 bg-slate-800 rounded-full flex items-center justify-center mb-4 animate-pulse">
+                                    <i data-lucide="phone" class="w-10 h-10 text-blue-500"></i>
+                                </div>
+                                <h3 class="text-xl font-bold text-white mb-1">${state.incomingCall.callerName}</h3>
+                                <p class="text-slate-400 mb-8">Incoming call...</p>
+                                <div class="flex gap-4">
+                                    <button onclick="rejectCall()" class="px-6 py-3 bg-red-600 hover:bg-red-700 text-white rounded-full font-medium transition-colors flex items-center gap-2"><i data-lucide="phone-off" class="w-5 h-5"></i> Decline</button>
+                                    <button onclick="answerCall()" class="px-6 py-3 bg-green-600 hover:bg-green-700 text-white rounded-full font-medium transition-colors flex items-center gap-2"><i data-lucide="phone" class="w-5 h-5"></i> Accept</button>
+                                </div>
+                            </div>
+                        </div>` : ''}
+
+                        <div id="chat-header" class="h-16 border-b border-slate-800 flex items-center justify-between px-4 md:px-6 bg-slate-900/30 backdrop-blur-md sticky top-0 z-10"></div>
+                        <div id="messages-container" class="flex-1 overflow-y-auto p-4 md:p-6 space-y-6 scrollbar-thin scrollbar-thumb-slate-800 scrollbar-track-transparent"></div>
+                        <div class="p-3 md:p-4 bg-slate-900 border-t border-slate-800 pb-safe">
+                            <form onsubmit="handleSendMessage(event)" class="flex gap-2 max-w-4xl mx-auto">
+                                <input id="message-input" oninput="checkSecretCode(this)" type="text" placeholder="Type a message..." class="flex-1 bg-slate-800 text-white border-0 rounded-xl px-4 py-3 focus:ring-2 focus:ring-blue-500 focus:outline-none placeholder-slate-500 text-base">
+                                <button type="submit" class="bg-blue-600 hover:bg-blue-700 text-white p-3 rounded-xl transition-colors shadow-lg shadow-blue-500/20"><i data-lucide="send" class="w-5 h-5"></i></button>
+                            </form>
+                            <div id="limit-warning" class="hidden text-center text-xs text-red-400 mt-2">Daily message limit reached.</div>
+                        </div>
+                    </div>
+                </div>
+                ${renderModals()}
+                ${renderAdminModal()}
+            `;
+            
+            renderSidebarContent();
+            renderUserFooter();
+            renderChatHeader();
+            renderMessages();
+            updateTabStyles();
+            lucide.createIcons();
+        }
+
+        function renderLogin() {
+            root.innerHTML = `
+                <div class="flex min-h-[100dvh] w-full items-center justify-center bg-[#0B0C15] p-6 font-sans">
+                    <div class="fixed top-1/4 left-1/4 w-96 h-96 bg-purple-900/20 rounded-full blur-[100px] pointer-events-none"></div>
+                    <div class="fixed bottom-1/4 right-1/4 w-96 h-96 bg-indigo-900/10 rounded-full blur-[100px] pointer-events-none"></div>
+                    <div class="w-full max-w-[420px] bg-[#15161E] border border-slate-800/60 rounded-[32px] p-8 md:p-10 shadow-2xl relative z-10 backdrop-blur-sm">
+                        <div class="flex flex-col items-center justify-center mb-12">
+                            <div class="flex items-center gap-4 mb-2">
+                                <div class="w-14 h-14 bg-[#1E1F2E] border border-slate-700/50 rounded-2xl flex items-center justify-center shadow-lg shadow-black/20">
+                                    <i data-lucide="wifi" class="text-indigo-500 w-7 h-7"></i>
+                                </div>
+                                <h1 class="text-3xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-indigo-400 to-purple-400">Chat Space</h1>
+                            </div>
+                            <p class="text-slate-500 text-sm mb-4">Enable notifications for the best experience.</p>
+                            ${state.joinError ? `<div class="mt-4 flex items-center gap-2 text-red-400 bg-red-900/20 px-4 py-2 rounded-lg text-sm border border-red-900/50"><i data-lucide="alert-triangle" class="w-4 h-4"></i>${state.joinError}</div>` : ''}
+                        </div>
+                        <form onsubmit="handleJoin(event)" class="space-y-8">
+                            <div class="space-y-2">
+                                <label class="block text-[11px] font-bold text-slate-500 tracking-[0.15em] uppercase ml-1">Username</label>
+                                <div class="relative group">
+                                    <div class="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none"><i data-lucide="user" class="text-slate-500 w-5 h-5"></i></div>
+                                    <input id="username-input" type="text" class="w-full bg-[#0B0C15] border border-slate-700/50 text-slate-200 pl-12 pr-4 py-4 rounded-xl focus:outline-none focus:border-indigo-500/50 focus:ring-1 focus:ring-indigo-500/50 transition-all placeholder-slate-600 text-lg" placeholder="Enter your name" required>
+                                </div>
+                            </div>
+                            <button type="submit" ${state.isJoining ? 'disabled' : ''} class="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-lg py-4 rounded-xl transition-all flex items-center justify-center gap-2 shadow-lg shadow-indigo-600/25 hover:shadow-indigo-500/30 disabled:opacity-50">
+                                ${state.isJoining ? 'Connecting...' : 'Start Chatting'}
+                                ${!state.isJoining ? '<i data-lucide="zap" class="w-5 h-5 fill-indigo-200 text-indigo-200"></i>' : ''}
+                            </button>
+                        </form>
+                    </div>
+                </div>`;
+            lucide.createIcons();
+        }
+
+        function render() {
+            if (state.authError) {
+                root.innerHTML = `
+                    <div class="flex h-[100dvh] w-full items-center justify-center bg-[#0B0C15] text-red-400 p-6">
+                        <div class="max-w-md text-center border border-red-900/50 bg-red-900/10 p-6 rounded-2xl">
+                            <h2 class="text-xl font-bold mb-2">Authentication Failed</h2>
+                            <p class="mb-4">${state.authError}</p>
+                            <div class="text-sm text-slate-400 text-left bg-black/30 p-4 rounded-lg font-mono">1. Go to Firebase Console > Authentication<br>2. Enable "Anonymous"<br>3. Save and Refresh.</div>
+                        </div>
+                    </div>`;
+                return;
+            }
+
+            if (!state.user) {
+                root.innerHTML = `
+                    <div class="flex h-[100dvh] w-full items-center justify-center bg-[#0B0C15] text-slate-200">
+                        <div class="animate-pulse flex flex-col items-center">
+                            <div class="h-8 w-8 bg-indigo-500 rounded-full mb-4"></div>
+                            <p class="text-indigo-400 font-medium tracking-wide text-sm">INITIALIZING UPLINK...</p>
+                        </div>
+                    </div>`;
+                return;
+            }
+
+            // --- BANNED / APPEAL VIEW ---
+            if (state.isBanned) {
+                if (state.isAppealing) {
+                    renderAppealChat();
+                } else {
+                    renderBannedScreen();
+                }
+                return;
+            }
+
+            if (!state.hasJoined) {
+                renderLogin();
+                return;
+            }
+
+            renderApp();
+        }
+    </script>
+</head>
+<body id="root" class="bg-slate-950 text-slate-200 m-0 p-0 overflow-hidden">
+</body>
+</html>
