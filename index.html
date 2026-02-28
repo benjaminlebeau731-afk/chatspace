@@ -60,15 +60,15 @@
         }
 
         // --- Configuration ---
-        // Load the Firebase config securely from the environment
-        let firebaseConfig;
-        try {
-            firebaseConfig = JSON.parse(__firebase_config);
-        } catch (e) {
-            console.error("Firebase config not found in environment. Please ensure the app is connected to Firebase.");
-            // Fallback structure to prevent immediate crash before error handling catches it
-            firebaseConfig = { apiKey: "", authDomain: "", projectId: "" };
-        }
+        const firebaseConfig = {
+            apiKey: "AIzaSyAkW6DI0jCMkOJY8t_txCntd5MhRed443w",
+            authDomain: "d-multiplayer-37078.firebaseapp.com",
+            projectId: "d-multiplayer-37078",
+            storageBucket: "d-multiplayer-37078.firebasestorage.app",
+            messagingSenderId: "1032442419330",
+            appId: "1:1032442419330:web:cfd110e8442febf829bc9b",
+            measurementId: "G-7KC04NRGE5"
+        };
 
         const app = initializeApp(firebaseConfig);
         const auth = getAuth(app);
@@ -169,8 +169,6 @@
         // --- Authentication & Init ---
         async function initAuth() {
             try {
-                if (!firebaseConfig.apiKey) throw new Error("Firebase configuration is missing.");
-                
                 if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
                     await signInWithCustomToken(auth, __initial_auth_token);
                 } else {
